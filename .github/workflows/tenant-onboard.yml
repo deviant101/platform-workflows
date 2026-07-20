@@ -1,0 +1,86 @@
+name: Tenant Onboard
+# Sales/platform runs this from the Actions tab. The inputs ARE the intake form.
+# It onboards a WHOLE tenant in one run: a tenant always gets the standard set
+# of apps (2-3 — here tenant-app + tenant-api, Decision 17), so this copies
+# EVERY app under tenant-blueprint/ into the tenant's directory and patches the
+# tenant-specific fields on top (Decision 16). One run = all the tenant's apps.
+# On sync, ArgoCD's ApplicationSet auto-creates one Application per app.
+#
+# so this checks out k8s-gitops using GITOPS_TOKEN (see SETUP.md).
+# Push model (Decision 15): commits and pushes DIRECTLY to main — no PR yet.
+# One cluster per tenant (Decision 14): all the tenant's apps go under
+# tenants/<cluster>/<tenant>/.
+on:
+  workflow_dispatch:
+    inputs:
+      tenant:   { description: "Tenant code, e.g. uco",                          required: true,  type: string }
+      name:     { description: "University display name",                        required: true,  type: string }
+      cluster:  { description: "Cluster, e.g. cluster-a",                        required: true,  type: string }
+      version:  { description: "Release tag override for ALL apps (blank = blueprint default)",  required: false, type: string }
+      replicas: { description: "Replica count override for ALL apps (blank = blueprint default)", required: false, type: string }
+
+jobs:
+  onboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/k8s-gitops
+          token: ${{ secrets.GITOPS_TOKEN }}
+
+      - name: Copy every blueprint app for the tenant, then patch
+        env:
+          TENANT:   ${{ inputs.tenant }}
+          NAME:     ${{ inputs.name }}
+          CLUSTER:  ${{ inputs.cluster }}
+          VERSION:  ${{ inputs.version }}
+          REPLICAS: ${{ inputs.replicas }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          tenant_dir="tenants/$CLUSTER/$TENANT"
+          if [ -e "$tenant_dir" ]; then
+            echo "::error::$tenant_dir already exists — tenant already onboarded"; exit 1
+          fi
+
+          blueprints=(tenant-blueprint/*/)
+          if [ ${#blueprints[@]} -eq 0 ]; then
+            echo "::error::no apps under tenant-blueprint/ — nothing to onboard"; exit 1
+          fi
+
+          mkdir -p "$tenant_dir"
+          for src in "${blueprints[@]}"; do
+            app=$(basename "$src")
+            dest="$tenant_dir/$app"
+            cp -r "tenant-blueprint/$app" "$dest"
+            f="$dest/values.yaml"
+
+            # Identity — the tenant display name shows on the app page
+            # (app.name = heading, app.title = browser tab). app.message keeps
+            # each app's blueprint default so tenant-app/tenant-api stay distinct.
+            yq -i '.app.name = strenv(NAME)' "$f"
+            yq -i '.app.title = strenv(NAME)' "$f"
+
+            # Optional tenant-wide overrides — only when provided; else keep
+            # each app's blueprint default.
+            if [ -n "${VERSION:-}" ];  then yq -i '.version = strenv(VERSION)' "$f"; fi
+            if [ -n "${REPLICAS:-}" ]; then yq -i '.replicaCount = env(REPLICAS)' "$f"; fi
+
+            echo "  + $dest (version $(yq '.version' "$f"))"
+          done
+
+          echo "Onboarded $TENANT with ${#blueprints[@]} app(s) under $tenant_dir"
+
+      - name: Commit and push directly (no PR — Decision 15)
+        env:
+          TENANT:  ${{ inputs.tenant }}
+          CLUSTER: ${{ inputs.cluster }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "tenants/$CLUSTER/$TENANT"
+          git commit -m "onboard: $TENANT on $CLUSTER (all apps from blueprint)"
+          git push origin HEAD:main
+          echo "Pushed to k8s-gitops. ArgoCD's ApplicationSet will create one Application per app."
