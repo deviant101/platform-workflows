@@ -1,0 +1,61 @@
+name: Tenant Offboard
+
+# Where it writes (Decision 13): tenant values live in k8s-gitops, so this
+# checks out k8s-gitops using GITOPS_TOKEN (see SETUP.md).
+# Push model (Decision 15): commits and pushes DIRECTLY to master — no PR yet.
+# On sync, ArgoCD's prune + self-heal reclaim the live resources.
+on:
+  workflow_dispatch:
+    inputs:
+      tenant: { description: "Tenant code to offboard, e.g. uco", required: true, type: string }
+
+jobs:
+  offboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/k8s-gitops
+          token: ${{ secrets.GITOPS_TOKEN }}
+
+      - name: Remove the tenant's directory
+        env:
+          TENANT: ${{ inputs.tenant }}
+        run: |
+          set -euo pipefail
+
+          # A tenant lives on exactly ONE cluster (a cluster may host many
+          # tenants — this is many-to-one), so its dir appears under exactly
+          # one cluster folder → exactly one match.
+          matches=$(find tenants -mindepth 2 -maxdepth 2 -type d -name "$TENANT")
+          count=$(printf '%s\n' "$matches" | grep -c . || true)
+
+          if [ "$count" -eq 0 ]; then
+            echo "::error::no directory for tenant '$TENANT' — nothing to offboard"; exit 1
+          fi
+          if [ "$count" -gt 1 ]; then
+            echo "::error::tenant '$TENANT' found in >1 cluster — expected exactly one (Decision 14):"
+            printf '%s\n' "$matches"; exit 1
+          fi
+
+          dir="$matches"
+          cluster_dir=$(dirname "$dir")
+          rm -rf "$dir"
+          echo "removed $dir"
+
+          # Drop the cluster folder ONLY if this was its last tenant. If other
+          # tenants still live on this cluster, rmdir fails (non-empty) and we
+          # leave the folder — and their dirs — untouched.
+          rmdir "$cluster_dir" 2>/dev/null && echo "removed empty $cluster_dir" || true
+
+      - name: Commit and push directly (no PR — Decision 15)
+        env:
+          TENANT: ${{ inputs.tenant }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A tenants/
+          git commit -m "offboard: remove tenant $TENANT"
+          git push origin HEAD:master
+          echo "Pushed to k8s-gitops. ArgoCD prunes the tenant's Applications."
