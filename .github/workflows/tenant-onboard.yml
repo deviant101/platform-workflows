@@ -6,16 +6,18 @@ name: Tenant Onboard
 # tenant-specific fields on top (Decision 16). One run = all the tenant's apps.
 # On sync, ArgoCD's ApplicationSet auto-creates one Application per app.
 #
-# so this checks out k8s-gitops using GITOPS_TOKEN (see SETUP.md).
+# Checks out k8s-gitops using GITOPS_TOKEN (see SETUP.md).
 # Push model (Decision 15): commits and pushes DIRECTLY to master — no PR yet.
-# One cluster per tenant (Decision 14): all the tenant's apps go under
-# tenants/<cluster>/<tenant>/.
+# Compliance region (Decision 18): the operator picks the tenant's region
+# (us/uk/eu); all its apps go under tenants/<region>/<cluster>/<tenant>/, and
+# only that region's ArgoCD will deploy them. One cluster per tenant (Decision 14).
 on:
   workflow_dispatch:
     inputs:
       tenant:   { description: "Tenant code, e.g. uco",                          required: true,  type: string }
       name:     { description: "University display name",                        required: true,  type: string }
-      cluster:  { description: "Cluster, e.g. cluster-a",                        required: true,  type: string }
+      region:   { description: "Compliance region (which regional ArgoCD deploys it)", required: true, type: choice, options: [us, uk, eu] }
+      cluster:  { description: "Spoke cluster in that region, e.g. cluster-a",    required: true,  type: string }
       version:  { description: "Release tag override for ALL apps (blank = blueprint default)",  required: false, type: string }
       replicas: { description: "Replica count override for ALL apps (blank = blueprint default)", required: false, type: string }
 
@@ -32,6 +34,7 @@ jobs:
         env:
           TENANT:   ${{ inputs.tenant }}
           NAME:     ${{ inputs.name }}
+          REGION:   ${{ inputs.region }}
           CLUSTER:  ${{ inputs.cluster }}
           VERSION:  ${{ inputs.version }}
           REPLICAS: ${{ inputs.replicas }}
@@ -39,7 +42,7 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
 
-          tenant_dir="tenants/$CLUSTER/$TENANT"
+          tenant_dir="tenants/$REGION/$CLUSTER/$TENANT"
           if [ -e "$tenant_dir" ]; then
             echo "::error::$tenant_dir already exists — tenant already onboarded"; exit 1
           fi
@@ -75,12 +78,13 @@ jobs:
       - name: Commit and push directly (no PR — Decision 15)
         env:
           TENANT:  ${{ inputs.tenant }}
+          REGION:  ${{ inputs.region }}
           CLUSTER: ${{ inputs.cluster }}
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "tenants/$CLUSTER/$TENANT"
-          git commit -m "onboard: $TENANT on $CLUSTER (all apps from blueprint)"
+          git add "tenants/$REGION/$CLUSTER/$TENANT"
+          git commit -m "onboard: $TENANT on $REGION/$CLUSTER (all apps from blueprint)"
           git push origin HEAD:master
-          echo "Pushed to k8s-gitops. ArgoCD's ApplicationSet will create one Application per app."
+          echo "Pushed to k8s-gitops. The $REGION ArgoCD will create one Application per app."
