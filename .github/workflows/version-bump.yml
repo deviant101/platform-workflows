@@ -4,14 +4,18 @@ name: Version Bump
 #
 # Where it writes (requirements Decision 13): the tenant values live in the
 # k8s-gitops repo (Repo 2), NOT here. So this workflow checks out k8s-gitops
-# and pushes there. That is a DIFFERENT repo from the one hosting this
-# workflow, so it always needs a token with write access to k8s-gitops:
-# GITOPS_TOKEN (a PAT / GitHub App token — see SETUP.md). The run's built-in
-# GITHUB_TOKEN can't reach k8s-gitops.
+# and pushes there — a DIFFERENT repo from the one hosting this workflow, so it
+# always needs a token with write access to k8s-gitops: GITOPS_TOKEN (a PAT /
+# GitHub App token — see SETUP.md). The run's built-in GITHUB_TOKEN can't reach
+# k8s-gitops.
 #
-# Push model (requirements Decision 15): it commits and pushes DIRECTLY to
-# master — no PR/review gate yet. The PR-based, CODEOWNERS-gated flow is
-# deferred and gets layered in later.
+# Finding the file: a tenant lives in exactly one region + cluster (Decisions
+# 14/18) and each app appears once, so tenant+app uniquely identifies the file
+# under tenants/<region>/<cluster>/<tenant>/<app>/ — no need to pass region or
+# cluster.
+#
+# Push model (requirements Decision 15): commits and pushes DIRECTLY to master —
+# no PR/review gate yet. The PR-based, CODEOWNERS-gated flow is deferred.
 #
 # Two ways to run:
 #   • workflow_dispatch — run it straight from THIS repo's Actions tab.
@@ -23,13 +27,11 @@ on:
     inputs:
       app:     { description: "App instance, e.g. tenant-app / tenant-api", required: true, type: string }
       tenant:  { description: "Tenant code, e.g. uco",    required: true, type: string }
-      cluster: { description: "Cluster, e.g. cluster-a",  required: true, type: string }
-      version: { description: "Release tag, e.g. v1.1.0", required: true, type: string }
+      version: { description: "Release tag, e.g. v0.1.1", required: true, type: string }
   workflow_call:
     inputs:
       app:     { required: true, type: string }
       tenant:  { required: true, type: string }
-      cluster: { required: true, type: string }
       version: { required: true, type: string }
 
 jobs:
@@ -46,21 +48,32 @@ jobs:
 
       - name: Update the pinned version
         env:
-          CLUSTER: ${{ inputs.cluster }}
           TENANT:  ${{ inputs.tenant }}
           APP:     ${{ inputs.app }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          file="tenants/$CLUSTER/$TENANT/$APP/values.yaml"
-          test -f "$file" || { echo "::error::$file not found in k8s-gitops — onboard the tenant first"; exit 1; }
+          shopt -s nullglob
+
+          # tenant+app is unique across regions/clusters → exactly one file.
+          matches=(tenants/*/*/"$TENANT"/"$APP"/values.yaml)
+          if [ ${#matches[@]} -eq 0 ]; then
+            echo "::error::no values file for $TENANT/$APP — onboard the tenant first"; exit 1
+          fi
+          if [ ${#matches[@]} -gt 1 ]; then
+            echo "::error::ambiguous — $TENANT/$APP matched multiple files:"; printf '%s\n' "${matches[@]}"; exit 1
+          fi
+          file="${matches[0]}"
+
           sed -i "s|^version:.*|version: $VERSION|" "$file"
           echo "Set $file -> $VERSION"
           grep '^version:' "$file"
 
+          # hand the resolved file path to the commit step
+          echo "FILE=$file" >> "$GITHUB_ENV"
+
       - name: Commit and push directly (no PR — Decision 15)
         env:
-          CLUSTER: ${{ inputs.cluster }}
           TENANT:  ${{ inputs.tenant }}
           APP:     ${{ inputs.app }}
           VERSION: ${{ inputs.version }}
@@ -68,7 +81,7 @@ jobs:
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "tenants/$CLUSTER/$TENANT/$APP/values.yaml"
-          git commit -m "bump: $TENANT/$APP on $CLUSTER -> $VERSION"
+          git add "$FILE"
+          git commit -m "bump: $TENANT/$APP -> $VERSION"
           git push origin HEAD:master
-          echo "Pushed to k8s-gitops. ArgoCD checks out app-$APP at $VERSION and syncs."
+          echo "Pushed to k8s-gitops. The region's ArgoCD checks out $APP at $VERSION and syncs."

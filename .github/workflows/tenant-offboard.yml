@@ -24,29 +24,31 @@ jobs:
         run: |
           set -euo pipefail
 
-          # A tenant lives on exactly ONE cluster (a cluster may host many
-          # tenants — this is many-to-one), so its dir appears under exactly
-          # one cluster folder → exactly one match.
-          matches=$(find tenants -mindepth 2 -maxdepth 2 -type d -name "$TENANT")
+          # A tenant lives in exactly ONE region + ONE cluster (many tenants may
+          # share a cluster — many-to-one), so its dir at
+          # tenants/<region>/<cluster>/<tenant> is unique → exactly one match.
+          matches=$(find tenants -mindepth 3 -maxdepth 3 -type d -name "$TENANT")
           count=$(printf '%s\n' "$matches" | grep -c . || true)
 
           if [ "$count" -eq 0 ]; then
             echo "::error::no directory for tenant '$TENANT' — nothing to offboard"; exit 1
           fi
           if [ "$count" -gt 1 ]; then
-            echo "::error::tenant '$TENANT' found in >1 cluster — expected exactly one (Decision 14):"
+            echo "::error::tenant '$TENANT' found in >1 region/cluster — expected exactly one (Decisions 14/18):"
             printf '%s\n' "$matches"; exit 1
           fi
 
-          dir="$matches"
-          cluster_dir=$(dirname "$dir")
+          dir="$matches"                    # tenants/<region>/<cluster>/<tenant>
+          cluster_dir=$(dirname "$dir")     # tenants/<region>/<cluster>
+          region_dir=$(dirname "$cluster_dir")  # tenants/<region>
           rm -rf "$dir"
           echo "removed $dir"
 
-          # Drop the cluster folder ONLY if this was its last tenant. If other
-          # tenants still live on this cluster, rmdir fails (non-empty) and we
-          # leave the folder — and their dirs — untouched.
+          # Drop the now-empty cluster folder, then the region folder, ONLY if
+          # each has nothing else left. rmdir fails on a non-empty dir, and the
+          # `|| true` just moves on — sibling tenants/clusters are untouched.
           rmdir "$cluster_dir" 2>/dev/null && echo "removed empty $cluster_dir" || true
+          rmdir "$region_dir"  2>/dev/null && echo "removed empty $region_dir"  || true
 
       - name: Commit and push directly (no PR — Decision 15)
         env:
