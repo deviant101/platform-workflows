@@ -59,16 +59,21 @@ jobs:
             cp -r "tenant-blueprint/$app" "$dest"
             f="$dest/values.yaml"
 
-            # Identity — the tenant display name shows on the app page
-            # (app.name = heading, app.title = browser tab). app.message keeps
-            # each app's blueprint default so tenant-app/tenant-api stay distinct.
+            # Identity — the tenant display name (app.name = heading,
+            # app.title = browser tab). EVERY app carries an `app` block for
+            # consistency (on dragonfly it's inert but kept), so patch uniformly.
             yq -i '.app.name = strenv(NAME)' "$f"
             yq -i '.app.title = strenv(NAME)' "$f"
 
-            # Optional tenant-wide overrides — only when provided; else keep
-            # each app's blueprint default.
-            if [ -n "${VERSION:-}" ];  then yq -i '.version = strenv(VERSION)' "$f"; fi
-            if [ -n "${REPLICAS:-}" ]; then yq -i '.replicaCount = env(REPLICAS)' "$f"; fi
+            # Optional tenant-wide overrides — only when provided:
+            #   - version: top-level on every app (read by the ApplicationSet)
+            #   - replicaCount: patched only where a TOP-LEVEL one exists
+            #     (custom apps). dragonfly's real replicas live under
+            #     .dragonfly.replicaCount, so we don't inject a dead top-level key.
+            if [ -n "${VERSION:-}" ]; then yq -i '.version = strenv(VERSION)' "$f"; fi
+            if [ -n "${REPLICAS:-}" ] && [ "$(yq '.replicaCount == null' "$f")" = "false" ]; then
+              yq -i '.replicaCount = env(REPLICAS)' "$f"
+            fi
 
             echo "  + $dest (version $(yq '.version' "$f"))"
           done
